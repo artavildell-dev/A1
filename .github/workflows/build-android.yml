@@ -1,0 +1,133 @@
+name: Build Android
+
+on: [workflow_dispatch]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout exact commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - name: Check exact ZIP
+        run: |
+          set -e
+          test -f "CalcVault-v1_2.zip"
+          echo "Using exact ZIP: CalcVault-v1_2.zip"
+          echo "Commit: $(git rev-parse HEAD)"
+          sha256sum "CalcVault-v1_2.zip"
+
+      - name: Extract project
+        run: |
+          set -e
+          rm -rf build-input
+          mkdir -p build-input
+          unzip -q "CalcVault-v1_2.zip" -d build-input
+
+      - name: Find Android project
+        run: |
+          set -e
+
+          echo "Searching for Android Gradle project..."
+
+          PROJECT_DIR=""
+
+          while IFS= read -r settings; do
+            DIR="$(dirname "$settings")"
+
+            if [ -f "$DIR/build.gradle" ] || [ -f "$DIR/build.gradle.kts" ]; then
+              PROJECT_DIR="$DIR"
+              break
+            fi
+          done < <(
+            find build-input -type f \
+              \( -name "settings.gradle" -o -name "settings.gradle.kts" \) \
+              | sort
+          )
+
+          if [ -z "$PROJECT_DIR" ]; then
+            echo "ERROR: Android Gradle project was not found."
+            echo "Files inside CalcVault-v1_2.zip:"
+            find build-input -maxdepth 6 -type f | sort | head -300
+            exit 1
+          fi
+
+          echo "Android project found:"
+          echo "$PROJECT_DIR"
+
+          echo "$PROJECT_DIR" > project-dir.txt
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Create Gradle Wrapper if missing
+        run: |
+          set -e
+
+          PROJECT_DIR="$(cat project-dir.txt)"
+          cd "$PROJECT_DIR"
+
+          if [ -f "./gradlew" ]; then
+            echo "Gradle Wrapper already exists."
+            chmod +x ./gradlew
+          else
+            echo "gradlew not found."
+            echo "Creating Gradle Wrapper..."
+
+            gradle wrapper
+
+            chmod +x ./gradlew
+          fi
+
+          ls -la
+
+      - name: Build APK
+        run: |
+          set -e
+
+          PROJECT_DIR="$(cat project-dir.txt)"
+          cd "$PROJECT_DIR"
+
+          chmod +x ./gradlew
+
+          ./gradlew assembleDebug --no-daemon
+
+      - name: Find APK
+        run: |
+          set -e
+
+          echo "Searching for generated APK..."
+
+          find build-input -type f -name "*.apk" -print
+
+          APK_COUNT=$(find build-input -type f -name "*.apk" | wc -l)
+
+          if [ "$APK_COUNT" -eq 0 ]; then
+            echo "ERROR: No APK was created."
+            exit 1
+          fi
+
+          rm -rf apk-output
+          mkdir -p apk-output
+
+          find build-input -type f -name "*.apk" -exec cp {} apk-output/ \;
+
+          echo "Generated APK:"
+          ls -lh apk-output
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: CalcVault-v1_2-APK
+          path: apk-output/*.apk
+          if-no-files-found: error
