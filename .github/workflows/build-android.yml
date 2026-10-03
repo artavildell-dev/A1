@@ -1,0 +1,47 @@
+name: Build Android
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout exact commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - name: Check exact ZIP
+        run: |
+          set -e
+          test -f CalcVault-v1_2.zip
+          echo "Using exact file: CalcVault-v1_2.zip"
+          echo "Commit: $(git rev-parse HEAD)"
+          echo "SHA256:"
+          sha256sum CalcVault-v1_2.zip
+
+      - name: Clean old build input
+        run: |
+          rm -rf build-input
+          mkdir -p build-input
+
+      - name: Extract exact ZIP
+        run: |
+          set -e
+          unzip -q CalcVault-v1_2.zip -d build-input
+
+      - name: Show extracted project
+        run: |
+          echo "Files from CalcVault-v1_2.zip:"
+          find build-input -maxdepth 3 -type f | sort | head -200
+
+      - name: Verify version
+        run: |
+          echo "================================"
+          echo "Exact ZIP selected successfully."
+          echo "ZIP: CalcVault-v1_2.zip"
+          echo "Commit: $(git rev-parse HEAD)"
+          echo "================================"
