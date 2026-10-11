@@ -1,0 +1,205 @@
+name: Build AR.AI Android
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: ar-ai-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build APK and Package Project
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout latest source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          clean: true
+
+      - name: Inspect repository
+        shell: bash
+        run: |
+          echo "Repository: $GITHUB_REPOSITORY"
+          echo "Commit: $GITHUB_SHA"
+          find . -maxdepth 4 -type f \
+            ! -path './.git/*' | sort | head -300
+
+      - name: Find and extract project ZIP if needed
+        shell: bash
+        run: |
+          set -e
+
+          has_gradle_settings() {
+            find "$1" \
+              -type f \
+              \( -name settings.gradle \
+              -o -name settings.gradle.kts \) \
+              ! -path '*/.git/*' \
+              ! -path '*/.gradle/*' \
+              ! -path '*/build/*' \
+              ! -path '*/node_modules/*' \
+              -print -quit 2>/dev/null | grep -q .
+          }
+
+          if has_gradle_settings "."; then
+            echo "Gradle project already exists."
+          else
+            ZIP=$(find . -maxdepth 5 -type f -iname '*.zip' \
+              ! -path './.git/*' -print -quit)
+
+            if [ -z "$ZIP" ]; then
+              echo "::error::No Gradle project or project ZIP found."
+              echo "Upload the complete AR.AI project ZIP to the repository."
+              exit 1
+            fi
+
+            echo "Extracting: $ZIP"
+            mkdir -p extracted-project
+            unzip -oq "$ZIP" -d extracted-project
+
+            if ! has_gradle_settings extracted-project; then
+              echo "::error::ZIP does not contain settings.gradle(.kts)."
+              find extracted-project -maxdepth 5 -type f | head -200
+              exit 1
+            fi
+
+            echo "Project extracted."
+          fi
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Detect Android project
+        id: project
+        shell: bash
+        run: |
+          set -e
+
+          ROOT=""
+
+          for BASE in "." "./extracted-project"; do
+            [ -d "$BASE" ] || continue
+
+            SETTINGS=$(find "$BASE" \
+              -type f \
+              \( -name settings.gradle.kts \
+              -o -name settings.gradle \) \
+              ! -path '*/.git/*' \
+              ! -path '*/.gradle/*' \
+              ! -path '*/build/*' \
+              ! -path '*/node_modules/*' \
+              -print -quit)
+
+            if [ -n "$SETTINGS" ]; then
+              ROOT="${SETTINGS%/*}"
+              [ "$ROOT" = "." ] && ROOT="."
+              break
+            fi
+          done
+
+          if [ -z "$ROOT" ]; then
+            echo "::error::Gradle settings file not found."
+            exit 1
+          fi
+
+          echo "Found project at: $ROOT"
+
+          if [ ! -f "$ROOT/build.gradle.kts" ] && \
+             [ ! -f "$ROOT/build.gradle" ]; then
+            echo "::error::Root Gradle build file not found."
+            exit 1
+          fi
+
+          APP=""
+
+          for MODULE in app android/app; do
+            if [ -f "$ROOT/$MODULE/build.gradle.kts" ] || \
+               [ -f "$ROOT/$MODULE/build.gradle" ]; then
+              APP="$MODULE"
+              break
+            fi
+          done
+
+          if [ -z "$APP" ]; then
+            echo "::error::Android app module not found."
+            echo "Check the module paths in settings.gradle."
+            exit 1
+          fi
+
+          echo "root=$ROOT" >> "$GITHUB_OUTPUT"
+          echo "app=$APP" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.11.1'
+
+      - name: Build debug APK
+        shell: bash
+        env:
+          PROJECT_ROOT: ${{ steps.project.outputs.root }}
+        run: |
+          set -e
+          cd "$PROJECT_ROOT"
+          gradle --no-daemon --stacktrace assembleDebug
+
+      - name: Collect APK
+        shell: bash
+        env:
+          PROJECT_ROOT: ${{ steps.project.outputs.root }}
+        run: |
+          set -e
+          mkdir -p release
+
+          APK=$(find "$PROJECT_ROOT" \
+            -type f \
+            -path '*/build/outputs/apk/debug/*.apk' \
+            -print -quit)
+
+          if [ -z "$APK" ]; then
+            echo "::error::APK was not generated."
+            exit 1
+          fi
+
+          cp "$APK" release/AR-AI-debug.apk
+
+      - name: Package complete source
+        shell: bash
+        run: |
+          set -e
+          mkdir -p release
+
+          zip -r release/AR-AI-full-source.zip . \
+            -x './.git/*' \
+               '*/.gradle/*' \
+               '*/build/*' \
+               './release/*' \
+               '*/node_modules/*'
+
+          test -s release/AR-AI-full-source.zip
+
+      - name: Upload APK and source ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: AR-AI-${{ github.sha }}
+          path: |
+            release/AR-AI-debug.apk
+            release/AR-AI-full-source.zip
+          if-no-files-found: error
+          retention-days: 14
